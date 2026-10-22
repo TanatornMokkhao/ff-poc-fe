@@ -1,11 +1,15 @@
 name: Release
 
-# The hub tags this repo; one tag releases the web app and the mobile apps together.
+# The hub tags this repo; one tag releases the web app and the mobile apps.
 #   staging/vX.Y.Z-rc.N  bake config.json for staging and for prod (from this repo's staging and
-#                        production environment variables), then build web and apps once for each;
-#                        a later rc on the same commit reuses those builds.
-#   prod/vX.Y.Z          only on a commit with a staging/vX.Y.Z-rc.N tag; reuse that rc's prod
-#                        builds (no rebuild) and release the apps to the stores (simulated).
+#                        production environment variables) and build the web for each at once;
+#                        the hub deploys the staging web without waiting for the apps.
+#                        The apps (staging and prod variants) are built only after a person approves
+#                        app-test, then go to the testers. A later rc on the same commit reuses
+#                        whatever was built.
+#   prod/vX.Y.Z          only on a commit with a staging/vX.Y.Z-rc.N tag; reuse that rc's prod web.
+#                        The apps wait for an approval on app-store: the rc's prod builds are reused,
+#                        or built then if the rc's apps were never approved. Store release simulated.
 on:
   push:
     tags: ['staging/v*', 'prod/v*']
@@ -16,18 +20,23 @@ permissions:
 jobs:
   meta:
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
     outputs:
       version: ${{ steps.v.outputs.version }}
       stage: ${{ steps.v.outputs.stage }}
       from: ${{ steps.v.outputs.from }}
       build: ${{ steps.v.outputs.stage == 'staging' && steps.v.outputs.from == '' }}
+      mobile_stages: ${{ steps.v.outputs.mobile_stages }}
+      config_stages: ${{ steps.v.outputs.config_stages }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       # The hub tags this repo; people do not tag here.
-      - name: Read the tag and find an earlier build of this commit
+      - name: Read the tag and find earlier builds of this commit
         id: v
         run: |
           if [[ "$GITHUB_REF_NAME" =~ ^staging/v([0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+)$ ]]; then
@@ -42,18 +51,27 @@ jobs:
             PREV=$(git tag --points-at "$GITHUB_SHA" | grep -E "^staging/v$VERSION-rc\.[0-9]+$" | sort -V | tail -1 || true)
             [ -n "$PREV" ] || { echo "No staging/v$VERSION-rc.N on this commit: it never went to staging."; exit 1; }
           fi
-          echo "stage=$STAGE" >> "$GITHUB_OUTPUT"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "from=$PREV" >> "$GITHUB_OUTPUT"
-          echo "$GITHUB_REF_NAME: ${PREV:+reuse the builds of $PREV}${PREV:-build new}"
+          # Apps already built for this commit? Then reuse them; otherwise build after the approval.
+          has() { [ -n "$PREV" ] && gh release view "$PREV" --json assets --jq '.assets[].name' 2>/dev/null | grep -qx "$1"; }
+          if [ "$STAGE" = prod ]; then
+            if has android-prod-app-release.aab; then MOBILE='[]'; else MOBILE='["prod"]'; fi
+          else
+            if has android-staging-app-release.apk; then MOBILE='[]'; else MOBILE='["staging","prod"]'; fi
+          fi
+          if [ "$STAGE" = staging ] && [ -z "$PREV" ]; then CONFIG='["staging","prod"]'; else CONFIG="$MOBILE"; fi
+          {
+            echo "stage=$STAGE"; echo "version=$VERSION"; echo "from=$PREV"
+            echo "mobile_stages=$MOBILE"; echo "config_stages=$CONFIG"
+          } >> "$GITHUB_OUTPUT"
+          echo "$GITHUB_REF_NAME: web ${PREV:+reuses $PREV}${PREV:-builds new}; apps to build after approval: $MOBILE"
 
   # One config.json per stage, from that environment's variables. Web and apps bake the same file.
   config:
     needs: meta
-    if: ${{ needs.meta.outputs.build == 'true' }}
+    if: ${{ needs.meta.outputs.config_stages != '[]' }}
     strategy:
       matrix:
-        stage: [staging, prod]
+        stage: ${{ fromJSON(needs.meta.outputs.config_stages) }}
     runs-on: ubuntu-latest
     environment: ${{ matrix.stage == 'prod' && 'production' || 'staging' }}
     steps:
@@ -99,68 +117,33 @@ jobs:
           name: web-${{ matrix.stage }}
           path: web-build-${{ matrix.stage }}.zip
 
-  android:
-    needs: [meta, config]
-    if: ${{ needs.meta.outputs.build == 'true' }}
-    strategy:
-      matrix:
-        stage: [staging, prod]
-    uses: ./.github/workflows/android.yml
-    secrets: inherit
-    with:
-      ref: ${{ github.sha }}
-      version_name: ${{ needs.meta.outputs.version }}
-      stage: ${{ matrix.stage }}
-
-  ios:
-    needs: [meta, config]
-    if: ${{ needs.meta.outputs.build == 'true' }}
-    strategy:
-      matrix:
-        stage: [staging, prod]
-    uses: ./.github/workflows/ios.yml
-    secrets: inherit
-    with:
-      ref: ${{ github.sha }}
-      version_name: ${{ needs.meta.outputs.version }}
-      stage: ${{ matrix.stage }}
-
-  # Puts the builds on this tag's release: new ones for a first rc, an earlier rc's otherwise.
-  # A prod release carries only the prod builds.
-  publish:
-    needs: [meta, web, android, ios]
-    if: ${{ !cancelled() && needs.meta.result == 'success' && (needs.meta.outputs.build != 'true' || (needs.web.result == 'success' && needs.android.result == 'success' && needs.ios.result == 'success')) }}
+  # Puts the web builds on this tag's release (new for a first rc, an earlier rc's otherwise); the
+  # hub waits for web-build-<stage>.zip, so staging deploys without waiting for the apps.
+  publish-web:
+    needs: [meta, web]
+    if: ${{ !cancelled() && needs.meta.result == 'success' && (needs.meta.outputs.build != 'true' || needs.web.result == 'success') }}
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       STAGE: ${{ needs.meta.outputs.stage }}
-      VERSION: ${{ needs.meta.outputs.version }}
       FROM: ${{ needs.meta.outputs.from }}
     steps:
       - uses: actions/download-artifact@v4
         if: ${{ needs.meta.outputs.build == 'true' }}
         with:
+          pattern: web-*
           path: builds
-
-      - name: Collect the builds
+          merge-multiple: true
+      - name: Collect the web builds
         run: |
           set -euo pipefail
           mkdir upload
-          if [ -n "$FROM" ]; then
-            gh release download "$FROM" -D upload -p 'web-build-*' -p 'android-*' -p 'ios-*'
-          else
-            for s in staging prod; do
-              cp "builds/web-$s/web-build-$s.zip" upload/
-              find "builds/android-release-$VERSION-$s" -name '*.aab' -exec cp {} "upload/android-$s-app-release.aab" \;
-              find "builds/android-release-$VERSION-$s" -name '*.apk' -exec cp {} "upload/android-$s-app-release.apk" \;
-              cp "builds/ios-simulator-app-$VERSION-$s/App-simulator.zip" "upload/ios-$s-App-simulator.zip"
-            done
-          fi
+          if [ -n "$FROM" ]; then gh release download "$FROM" -D upload -p 'web-build-*'
+          else cp builds/web-build-*.zip upload/; fi
           [ "$STAGE" = prod ] && find upload -type f ! -name '*prod*' -delete
           [ -f "upload/web-build-$STAGE.zip" ] || { echo "::error::No web-build-$STAGE.zip in ${FROM:-this build}. An rc made before per-stage builds cannot be reused: release a new rc."; exit 1; }
           ls -la upload
-
       - name: GitHub release (reuse the one made in the UI, if any)
         run: |
           FLAG=$([ "$STAGE" = staging ] && echo --prerelease || echo --latest)
@@ -171,59 +154,16 @@ jobs:
           fi
           gh release upload "$GITHUB_REF_NAME" upload/* --clobber
 
-  # The apps reach testers only after a person approves the app-test environment. The web and the
-  # BE never wait for this: the hub deploys staging as soon as publish has run.
-  mobile-test:
-    needs: [meta, publish]
-    if: ${{ !cancelled() && needs.publish.result == 'success' && needs.meta.outputs.stage == 'staging' }}
+  # Nothing is built or sent for the apps until a person approves: app-test for an rc, app-store
+  # for prod. Leaving it unapproved costs no build minutes.
+  mobile-approval:
+    needs: [meta, publish-web]
+    if: ${{ !cancelled() && needs.publish-web.result == 'success' }}
     runs-on: ubuntu-latest
-    environment: app-test
-    env:
-      GH_TOKEN: ${{ github.token }}
-      GH_REPO: ${{ github.repository }}
-      VERSION: ${{ needs.meta.outputs.version }}
-      FROM: ${{ needs.meta.outputs.from }}
+    environment: ${{ needs.meta.outputs.stage == 'prod' && 'app-store' || 'app-test' }}
     steps:
-      # Real, not simulated: the staging app goes to the testers through Firebase App Distribution.
-      - name: Send the staging Android app to testers
-        if: ${{ vars.FIREBASE_APP_ID_ANDROID_STAGING != '' }}
-        env:
-          SA_JSON: ${{ secrets.FIREBASE_DISTRIBUTION_SA_JSON }}
-          APP_ID: ${{ vars.FIREBASE_APP_ID_ANDROID_STAGING }}
-          GROUPS: ${{ vars.FIREBASE_TESTER_GROUPS || 'staging-testers' }}
-        run: |
-          set -euo pipefail
-          gh release download "$GITHUB_REF_NAME" -p android-staging-app-release.apk -D app
-          printf '%s' "$SA_JSON" > "$RUNNER_TEMP/sa.json"
-          GOOGLE_APPLICATION_CREDENTIALS="$RUNNER_TEMP/sa.json" npx --yes firebase-tools@15.32.1 \
-            appdistribution:distribute app/android-staging-app-release.apk \
-            --app "$APP_ID" --groups "$GROUPS" --release-notes "staging $VERSION"
-          rm -f "$RUNNER_TEMP/sa.json"
-      - name: Test channels
-        run: |
-          SENT=$([ -n "${{ vars.FIREBASE_APP_ID_ANDROID_STAGING }}" ] && echo "sent to **Firebase App Distribution**" || echo "not sent: set FIREBASE_APP_ID_ANDROID_STAGING")
-          {
-            echo "### App $VERSION on the test channels (approved)"
-            [ -n "$FROM" ] && echo "Same builds as **$FROM** (this commit was built for that rc)."
-            echo "| App | Android | iOS |"
-            echo "| --- | --- | --- |"
-            echo "| staging \`com.tanatorn.ioniccipoc.staging\` (testers, staging API) | \`android-staging-app-release.apk\` $SENT | \`ios-staging-App-simulator.zip\` (simulated) |"
-            echo "| prod \`com.tanatorn.ioniccipoc\` (the build the stores get) | \`android-prod-app-release.aab\` to Play **internal** (simulated) | \`ios-prod-App-simulator.zip\` to **TestFlight** (simulated) |"
-            echo
-            echo "A signed IPA needs an Apple account; the iOS files are Simulator builds."
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  # Simulated: the prod tag promotes the rc's prod app builds to the stores. A person approves first.
-  mobile-store:
-    needs: [meta, publish]
-    if: ${{ needs.meta.outputs.stage == 'prod' }}
-    runs-on: ubuntu-latest
-    environment: app-store
-    env:
-      VERSION: ${{ needs.meta.outputs.version }}
-      STG: ${{ needs.meta.outputs.from }}
-    steps:
-      - name: Store credentials (from the app-store environment)
+      - name: Store credentials (prod only, from the app-store environment)
+        if: ${{ needs.meta.outputs.stage == 'prod' }}
         env:
           PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
           APP_STORE_CONNECT_API_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
@@ -231,14 +171,109 @@ jobs:
           [ -n "$PLAY_SERVICE_ACCOUNT_JSON" ] || { echo "::error::PLAY_SERVICE_ACCOUNT_JSON is missing in the app-store environment."; exit 1; }
           [ -n "$APP_STORE_CONNECT_API_KEY" ] || { echo "::error::APP_STORE_CONNECT_API_KEY is missing in the app-store environment."; exit 1; }
           echo "Play project: $(jq -r '.project_id // "not set"' <<<"$PLAY_SERVICE_ACCOUNT_JSON" 2>/dev/null || echo 'not JSON')"
-          echo "App Store Connect key: present"
-      - name: Simulated store release
+      - run: 'echo "Approved. Apps to build: ${{ needs.meta.outputs.mobile_stages }} (empty = reuse the rc builds)."'
+
+  android:
+    needs: [meta, config, mobile-approval]
+    if: ${{ !cancelled() && needs.mobile-approval.result == 'success' && needs.meta.outputs.mobile_stages != '[]' }}
+    strategy:
+      matrix:
+        stage: ${{ fromJSON(needs.meta.outputs.mobile_stages) }}
+    uses: ./.github/workflows/android.yml
+    secrets: inherit
+    with:
+      ref: ${{ github.sha }}
+      version_name: ${{ needs.meta.outputs.version }}
+      stage: ${{ matrix.stage }}
+
+  ios:
+    needs: [meta, config, mobile-approval]
+    if: ${{ !cancelled() && needs.mobile-approval.result == 'success' && needs.meta.outputs.mobile_stages != '[]' }}
+    strategy:
+      matrix:
+        stage: ${{ fromJSON(needs.meta.outputs.mobile_stages) }}
+    uses: ./.github/workflows/ios.yml
+    secrets: inherit
+    with:
+      ref: ${{ github.sha }}
+      version_name: ${{ needs.meta.outputs.version }}
+      stage: ${{ matrix.stage }}
+
+  # Attaches the app builds (new, or the rc's) and sends them: staging to the testers, prod to the
+  # stores (simulated).
+  mobile-release:
+    needs: [meta, mobile-approval, android, ios]
+    if: ${{ !cancelled() && needs.mobile-approval.result == 'success' && (needs.meta.outputs.mobile_stages == '[]' || (needs.android.result == 'success' && needs.ios.result == 'success')) }}
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      STAGE: ${{ needs.meta.outputs.stage }}
+      VERSION: ${{ needs.meta.outputs.version }}
+      FROM: ${{ needs.meta.outputs.from }}
+      BUILT: ${{ join(fromJSON(needs.meta.outputs.mobile_stages), ' ') }}
+    steps:
+      - uses: actions/download-artifact@v4
+        if: ${{ needs.meta.outputs.mobile_stages != '[]' }}
+        with:
+          pattern: android-release-*
+          path: builds
+      - uses: actions/download-artifact@v4
+        if: ${{ needs.meta.outputs.mobile_stages != '[]' }}
+        with:
+          pattern: ios-simulator-app-*
+          path: builds
+      - name: Collect the app builds
         run: |
-          {
-            echo "### App $VERSION released to the stores (simulated)"
-            echo "The prod builds of **$STG**, no rebuild."
-            echo "| Platform | Would run |"
-            echo "| --- | --- |"
-            echo "| Android | promote \`android-prod-app-release.aab\` of $STG from internal to **production** (staged rollout 10%) |"
-            echo "| iOS | submit the prod build of $STG from TestFlight for **App Store review**, release by hand after approval |"
-          } >> "$GITHUB_STEP_SUMMARY"
+          set -euo pipefail
+          mkdir upload
+          if [ -z "$BUILT" ]; then
+            gh release download "$FROM" -D upload -p 'android-*' -p 'ios-*'
+            [ "$STAGE" = prod ] && find upload -type f ! -name '*prod*' -delete
+          fi
+          for s in $BUILT; do
+            find "builds/android-release-$VERSION-$s" -name '*.aab' -exec cp {} "upload/android-$s-app-release.aab" \;
+            find "builds/android-release-$VERSION-$s" -name '*.apk' -exec cp {} "upload/android-$s-app-release.apk" \;
+            cp "builds/ios-simulator-app-$VERSION-$s/App-simulator.zip" "upload/ios-$s-App-simulator.zip"
+          done
+          ls -la upload
+          gh release upload "$GITHUB_REF_NAME" upload/* --clobber
+
+      # Real, not simulated: the staging app goes to the testers through Firebase App Distribution.
+      - name: Send the staging Android app to testers
+        if: ${{ needs.meta.outputs.stage == 'staging' && vars.FIREBASE_APP_ID_ANDROID_STAGING != '' }}
+        env:
+          SA_JSON: ${{ secrets.FIREBASE_DISTRIBUTION_SA_JSON }}
+          APP_ID: ${{ vars.FIREBASE_APP_ID_ANDROID_STAGING }}
+          GROUPS: ${{ vars.FIREBASE_TESTER_GROUPS || 'staging-testers' }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$SA_JSON" > "$RUNNER_TEMP/sa.json"
+          GOOGLE_APPLICATION_CREDENTIALS="$RUNNER_TEMP/sa.json" npx --yes firebase-tools@15.32.1 \
+            appdistribution:distribute upload/android-staging-app-release.apk \
+            --app "$APP_ID" --groups "$GROUPS" --release-notes "staging $VERSION"
+          rm -f "$RUNNER_TEMP/sa.json"
+
+      - name: Summary
+        run: |
+          HOW=$([ -n "$BUILT" ] && echo "built after the approval" || echo "the builds of **$FROM**, no rebuild")
+          if [ "$STAGE" = staging ]; then
+            SENT=$([ -n "${{ vars.FIREBASE_APP_ID_ANDROID_STAGING }}" ] && echo "sent to **Firebase App Distribution**" || echo "not sent: set FIREBASE_APP_ID_ANDROID_STAGING")
+            {
+              echo "### App $VERSION on the test channels ($HOW)"
+              echo "| App | Android | iOS |"
+              echo "| --- | --- | --- |"
+              echo "| staging (testers, staging API) | \`android-staging-app-release.apk\` $SENT | \`ios-staging-App-simulator.zip\` (simulated) |"
+              echo "| prod (the build the stores get) | \`android-prod-app-release.aab\` to Play **internal** (simulated) | \`ios-prod-App-simulator.zip\` to **TestFlight** (simulated) |"
+              echo
+              echo "A signed IPA needs an Apple account; the iOS files are Simulator builds."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "### App $VERSION released to the stores (simulated, $HOW)"
+              echo "| Platform | Would run |"
+              echo "| --- | --- |"
+              echo "| Android | promote \`android-prod-app-release.aab\` from internal to **production** (staged rollout 10%) |"
+              echo "| iOS | submit the prod build for **App Store review**, release by hand after approval |"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
