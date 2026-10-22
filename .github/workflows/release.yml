@@ -1,0 +1,161 @@
+name: Release
+
+# One tag releases the web app and the mobile app together; they share this code and version.
+# v1.2.0-rc.N: build the web once (attached to the release), build the apps for the test
+#              channels, and point hub staging at this version.
+# v1.2.0:      only on a commit that already has a 1.2.0 rc; reuse that rc's web build
+#              (no rebuild) and open a PR in the hub to point production at it.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      stage: ${{ steps.v.outputs.stage }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version
+        id: v
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]; then STAGE=staging
+          elif [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then STAGE=prod
+          else echo "Tag $GITHUB_REF_NAME is not vX.Y.Z or vX.Y.Z-rc.N"; exit 1; fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "stage=$STAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Production must come from an rc of the same version
+        if: ${{ steps.v.outputs.stage == 'prod' }}
+        id: rc
+        run: |
+          RC=$(git tag --points-at "$GITHUB_SHA" | grep -E "^v${{ steps.v.outputs.version }}-rc\.[0-9]+$" | sort -V | tail -1)
+          [ -n "$RC" ] || { echo "No v${{ steps.v.outputs.version }}-rc.N on this commit: it never went to staging."; exit 1; }
+          echo "rc=$RC" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@v4
+        if: ${{ steps.v.outputs.stage == 'staging' }}
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Build the web once (rc)
+        if: ${{ steps.v.outputs.stage == 'staging' }}
+        run: |
+          npm ci
+          npx vitest run
+          VITE_APP_VERSION="${{ steps.v.outputs.version }}" npm run build
+          rm -f dist/config.json
+          (cd dist && zip -qr "$GITHUB_WORKSPACE/web-build.zip" .)
+
+      - name: Reuse the rc's web build (final)
+        if: ${{ steps.v.outputs.stage == 'prod' }}
+        run: gh release download "${{ steps.rc.outputs.rc }}" -p web-build.zip
+
+      - name: GitHub release
+        run: |
+          FLAG=$([ "${{ steps.v.outputs.stage }}" = staging ] && echo --prerelease || echo --latest)
+          gh release create "$GITHUB_REF_NAME" web-build.zip --generate-notes $FLAG
+
+  android:
+    needs: web
+    if: ${{ needs.web.outputs.stage == 'staging' }}
+    uses: ./.github/workflows/android.yml
+    secrets: inherit
+    with:
+      ref: ${{ github.sha }}
+      version_name: ${{ needs.web.outputs.version }}
+      api_env: staging
+
+  ios:
+    needs: web
+    if: ${{ needs.web.outputs.stage == 'staging' }}
+    uses: ./.github/workflows/ios.yml
+    secrets: inherit
+    with:
+      ref: ${{ github.sha }}
+      version_name: ${{ needs.web.outputs.version }}
+      api_env: staging
+
+  # Simulated: keeps the rc's app builds on the rc release and says where they would go.
+  mobile-test-channels:
+    needs: [web, android, ios]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.web.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: builds
+      - name: Attach the app builds to the rc release
+        run: |
+          mkdir -p upload
+          find builds -name '*.aab' -exec cp {} upload/android-app-release.aab \; || true
+          find builds -path '*release*' -name '*.apk' -exec cp {} upload/android-app-release.apk \; || true
+          find builds -name 'App-simulator.zip' -exec cp {} upload/ios-App-simulator.zip \; || true
+          ls -la upload
+          gh release upload "$GITHUB_REF_NAME" upload/* --clobber
+      - name: Simulated upload to test channels
+        run: |
+          {
+            echo "### App $VERSION sent to test channels (simulated)"
+            echo "| Platform | Would run | Build |"
+            echo "| --- | --- | --- |"
+            echo "| Android | upload to Play **internal** track | \`android-app-release.aab\` |"
+            echo "| iOS | upload to **TestFlight** internal testers | \`ios-App-simulator.zip\` (a signed IPA needs an Apple account) |"
+            echo ""
+            echo "Builds are attached to release $GITHUB_REF_NAME."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Simulated: the final tag promotes the rc's app builds to the stores. A person approves first.
+  mobile-store:
+    needs: web
+    if: ${{ needs.web.outputs.stage == 'prod' }}
+    runs-on: ubuntu-latest
+    environment: app-store
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.web.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Take the builds from the rc release
+        run: |
+          RC=$(git tag --points-at "$GITHUB_SHA" | grep -E "^v$VERSION-rc\.[0-9]+$" | sort -V | tail -1)
+          echo "RC=$RC" >> "$GITHUB_ENV"
+          mkdir builds && gh release download "$RC" -D builds -p 'android-*' -p 'ios-*'
+          ls -la builds
+          gh release upload "$GITHUB_REF_NAME" builds/* --clobber
+      - name: Simulated store release
+        run: |
+          {
+            echo "### App $VERSION released to the stores (simulated)"
+            echo "Same builds as **$RC**, no rebuild."
+            echo "| Platform | Would run |"
+            echo "| --- | --- |"
+            echo "| Android | promote the $RC build from internal to **production** (staged rollout 10%) |"
+            echo "| iOS | submit the $RC TestFlight build for **App Store review**, release by hand after approval |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  hub:
+    needs: web
+    uses: TanatornMokkhao/ff-poc-hub/.github/workflows/promote.yml@main
+    with:
+      app: fe,mobile
+      version: ${{ needs.web.outputs.version }}
+      stage: ${{ needs.web.outputs.stage }}
+    secrets:
+      DEPLOY_REPO_TOKEN: ${{ secrets.DEPLOY_REPO_TOKEN }}
