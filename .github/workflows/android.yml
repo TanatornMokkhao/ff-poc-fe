@@ -14,9 +14,10 @@ on:
       version_code:
         type: string
         default: ''
-      api_env:
+      stage:
+        description: staging or prod; bakes that stage's config.json (from the caller's config-<stage> artifact)
         type: string
-        default: dev
+        default: ''
       upload_play:
         type: boolean
         default: false
@@ -31,7 +32,8 @@ jobs:
       VERSION_CODE: ${{ inputs.version_code || github.run_number }}
       VERSION_NAME: ${{ inputs.version_name || '0.0.0-dev' }}
       VITE_APP_VERSION: ${{ inputs.version_name || '0.0.0-dev' }}
-      VITE_API_ENV: ${{ inputs.api_env || 'dev' }}
+      VITE_API_ENV: ${{ inputs.stage || 'dev' }}
+      SUFFIX: ${{ inputs.stage && format('-{0}', inputs.stage) || '' }}
       HAS_KEYSTORE: ${{ secrets.KEYSTORE_BASE64 != '' }}
       HAS_GOOGLE_SERVICES: ${{ secrets.GOOGLE_SERVICES_JSON != '' }}
     steps:
@@ -50,6 +52,14 @@ jobs:
           java-version: 21
 
       - run: npm ci
+      - uses: actions/download-artifact@v4
+        if: ${{ inputs.stage != '' }}
+        with:
+          name: config-${{ inputs.stage }}
+          path: public
+      - name: Local config.json (not a release build)
+        if: ${{ inputs.stage == '' }}
+        run: node scripts/write-config.mjs
       - run: npm run build
       - run: npx cap sync android
 
@@ -99,13 +109,13 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: android-debug-apk
+          name: android-debug-apk${{ env.SUFFIX }}
           path: android/app/build/outputs/apk/debug/*.apk
 
       - uses: actions/upload-artifact@v4
         if: ${{ env.HAS_KEYSTORE == 'true' }}
         with:
-          name: android-release-${{ env.VERSION_NAME }}
+          name: android-release-${{ env.VERSION_NAME }}${{ env.SUFFIX }}
           path: |
             android/app/build/outputs/apk/release/*.apk
             android/app/build/outputs/bundle/release/*.aab
@@ -119,7 +129,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: android-release-${{ inputs.version_name }}
+          name: android-release-${{ inputs.version_name }}-prod
           path: release
 
       - uses: r0adkll/upload-google-play@v1

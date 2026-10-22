@@ -45,3 +45,6 @@ GoogleService-Info.plist
 .env
 .env.*
 !.env.example
+
+# Written per stage by scripts/write-config.mjs
+public/config.json

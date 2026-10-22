@@ -1,9 +1,10 @@
 name: Release
 
-# The hub tags this repo; one tag releases the web app and the mobile app together.
-#   staging/vX.Y.Z-rc.N  build the web (attached to the release) and the apps for the test
-#                        channels; a later rc on the same commit reuses those builds.
-#   prod/vX.Y.Z          only on a commit with a staging/vX.Y.Z-rc.N tag; reuse that rc's
+# The hub tags this repo; one tag releases the web app and the mobile apps together.
+#   staging/vX.Y.Z-rc.N  bake config.json for staging and for prod (from this repo's staging and
+#                        production environment variables), then build web and apps once for each;
+#                        a later rc on the same commit reuses those builds.
+#   prod/vX.Y.Z          only on a commit with a staging/vX.Y.Z-rc.N tag; reuse that rc's prod
 #                        builds (no rebuild) and release the apps to the stores (simulated).
 on:
   push:
@@ -13,14 +14,13 @@ permissions:
   contents: write
 
 jobs:
-  web:
+  meta:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.v.outputs.version }}
       stage: ${{ steps.v.outputs.stage }}
       from: ${{ steps.v.outputs.from }}
-    env:
-      GH_TOKEN: ${{ github.token }}
+      build: ${{ steps.v.outputs.stage == 'staging' && steps.v.outputs.from == '' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -45,120 +45,163 @@ jobs:
           echo "stage=$STAGE" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "from=$PREV" >> "$GITHUB_OUTPUT"
-          echo "$GITHUB_REF_NAME: ${PREV:+reuse the build of $PREV}${PREV:-build new}"
+          echo "$GITHUB_REF_NAME: ${PREV:+reuse the builds of $PREV}${PREV:-build new}"
 
+  # One config.json per stage, from that environment's variables. Web and apps bake the same file.
+  config:
+    needs: meta
+    if: ${{ needs.meta.outputs.build == 'true' }}
+    strategy:
+      matrix:
+        stage: [staging, prod]
+    runs-on: ubuntu-latest
+    environment: ${{ matrix.stage == 'prod' && 'production' || 'staging' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bake config.json
+        env:
+          STAGE: ${{ matrix.stage }}
+          VARS_JSON: ${{ toJSON(vars) }}
+        run: node scripts/write-config.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: config-${{ matrix.stage }}
+          path: public/config.json
+
+  web:
+    needs: [meta, config]
+    if: ${{ needs.meta.outputs.build == 'true' }}
+    strategy:
+      matrix:
+        stage: [staging, prod]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        if: ${{ steps.v.outputs.from == '' }}
         with:
           node-version: 22
           cache: npm
-
-      - name: Build the web once (first rc of this commit)
-        if: ${{ steps.v.outputs.from == '' }}
+      - run: npm ci
+      - run: npx vitest run
+      - uses: actions/download-artifact@v4
+        with:
+          name: config-${{ matrix.stage }}
+          path: public
+      - name: Build the web for ${{ matrix.stage }}
+        env:
+          VITE_APP_VERSION: ${{ needs.meta.outputs.version }}
+          VITE_API_ENV: ${{ matrix.stage }}
         run: |
-          npm ci
-          npx vitest run
-          VITE_APP_VERSION="${{ steps.v.outputs.version }}" npm run build
-          rm -f dist/config.json
-          (cd dist && zip -qr "$GITHUB_WORKSPACE/web-build.zip" .)
+          npm run build
+          (cd dist && zip -qr "$GITHUB_WORKSPACE/web-build-${{ matrix.stage }}.zip" .)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-${{ matrix.stage }}
+          path: web-build-${{ matrix.stage }}.zip
 
-      - name: Reuse the build already made for this commit
-        if: ${{ steps.v.outputs.from != '' }}
-        run: gh release download "${{ steps.v.outputs.from }}" -p web-build.zip
-
-      - name: GitHub release (reuse the one made in the UI, if any)
-        run: |
-          FLAG=$([ "${{ steps.v.outputs.stage }}" = staging ] && echo --prerelease || echo --latest)
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release edit "$GITHUB_REF_NAME" $FLAG
-            gh release upload "$GITHUB_REF_NAME" web-build.zip --clobber
-          else
-            gh release create "$GITHUB_REF_NAME" web-build.zip --generate-notes $FLAG
-          fi
-
-  # Apps are built only for the first rc of a commit; a later rc of the same commit reuses them.
   android:
-    needs: web
-    if: ${{ needs.web.outputs.stage == 'staging' && needs.web.outputs.from == '' }}
+    needs: [meta, config]
+    if: ${{ needs.meta.outputs.build == 'true' }}
+    strategy:
+      matrix:
+        stage: [staging, prod]
     uses: ./.github/workflows/android.yml
     secrets: inherit
     with:
       ref: ${{ github.sha }}
-      version_name: ${{ needs.web.outputs.version }}
-      api_env: staging
+      version_name: ${{ needs.meta.outputs.version }}
+      stage: ${{ matrix.stage }}
 
   ios:
-    needs: web
-    if: ${{ needs.web.outputs.stage == 'staging' && needs.web.outputs.from == '' }}
+    needs: [meta, config]
+    if: ${{ needs.meta.outputs.build == 'true' }}
+    strategy:
+      matrix:
+        stage: [staging, prod]
     uses: ./.github/workflows/ios.yml
     secrets: inherit
     with:
       ref: ${{ github.sha }}
-      version_name: ${{ needs.web.outputs.version }}
-      api_env: staging
+      version_name: ${{ needs.meta.outputs.version }}
+      stage: ${{ matrix.stage }}
 
-  # Simulated: puts the app builds on the staging release and says where they would go.
-  mobile-test-channels:
-    needs: [web, android, ios]
-    if: ${{ !cancelled() && needs.web.outputs.stage == 'staging' && (needs.web.outputs.from != '' || (needs.android.result == 'success' && needs.ios.result == 'success')) }}
+  # Puts the builds on this tag's release: new ones for a first rc, an earlier rc's otherwise.
+  # A prod release carries only the prod builds.
+  publish:
+    needs: [meta, web, android, ios]
+    if: ${{ !cancelled() && needs.meta.result == 'success' && (needs.meta.outputs.build != 'true' || (needs.web.result == 'success' && needs.android.result == 'success' && needs.ios.result == 'success')) }}
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
-      VERSION: ${{ needs.web.outputs.version }}
-      FROM: ${{ needs.web.outputs.from }}
+      GH_REPO: ${{ github.repository }}
+      STAGE: ${{ needs.meta.outputs.stage }}
+      VERSION: ${{ needs.meta.outputs.version }}
+      FROM: ${{ needs.meta.outputs.from }}
     steps:
-      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
-        if: ${{ needs.web.outputs.from == '' }}
+        if: ${{ needs.meta.outputs.build == 'true' }}
         with:
           path: builds
-      - name: Attach the app builds to the staging release
+
+      - name: Collect the builds
         run: |
-          mkdir -p upload
+          set -euo pipefail
+          mkdir upload
           if [ -n "$FROM" ]; then
-            gh release download "$FROM" -D upload -p 'android-*' -p 'ios-*'
+            gh release download "$FROM" -D upload -p 'web-build-*' -p 'android-*' -p 'ios-*'
           else
-            find builds -name '*.aab' -exec cp {} upload/android-app-release.aab \; || true
-            find builds -path '*release*' -name '*.apk' -exec cp {} upload/android-app-release.apk \; || true
-            find builds -name 'App-simulator.zip' -exec cp {} upload/ios-App-simulator.zip \; || true
+            for s in staging prod; do
+              cp "builds/web-$s/web-build-$s.zip" upload/
+              find "builds/android-release-$VERSION-$s" -name '*.aab' -exec cp {} "upload/android-$s-app-release.aab" \;
+              find "builds/android-release-$VERSION-$s" -name '*.apk' -exec cp {} "upload/android-$s-app-release.apk" \;
+              cp "builds/ios-simulator-app-$VERSION-$s/App-simulator.zip" "upload/ios-$s-App-simulator.zip"
+            done
           fi
+          [ "$STAGE" = prod ] && find upload -type f ! -name '*prod*' -delete
+          [ -f "upload/web-build-$STAGE.zip" ] || { echo "::error::No web-build-$STAGE.zip in ${FROM:-this build}. An rc made before per-stage builds cannot be reused: release a new rc."; exit 1; }
           ls -la upload
+
+      - name: GitHub release (reuse the one made in the UI, if any)
+        run: |
+          FLAG=$([ "$STAGE" = staging ] && echo --prerelease || echo --latest)
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" $FLAG
+          else
+            gh release create "$GITHUB_REF_NAME" --generate-notes $FLAG
+          fi
           gh release upload "$GITHUB_REF_NAME" upload/* --clobber
+
       - name: Simulated upload to test channels
+        if: ${{ needs.meta.outputs.stage == 'staging' }}
         run: |
           {
             echo "### App $VERSION sent to test channels (simulated)"
             [ -n "$FROM" ] && echo "Same builds as **$FROM** (this commit was built for that rc)."
-            echo "| Platform | Would run | Build |"
+            echo "| App | Android | iOS |"
             echo "| --- | --- | --- |"
-            echo "| Android | upload to Play **internal** track | \`android-app-release.aab\` |"
-            echo "| iOS | upload to **TestFlight** internal testers | \`ios-App-simulator.zip\` (a signed IPA needs an Apple account) |"
+            echo "| staging (testers, staging API) | \`android-staging-app-release.aab\` to Play **internal** | \`ios-staging-App-simulator.zip\` to **TestFlight** |"
+            echo "| prod (the build the stores get) | \`android-prod-app-release.aab\` to Play **internal** | \`ios-prod-App-simulator.zip\` to **TestFlight** |"
+            echo
+            echo "A signed IPA needs an Apple account; the iOS files are Simulator builds."
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # Simulated: the prod tag promotes the rc's app builds to the stores. A person approves first.
+  # Simulated: the prod tag promotes the rc's prod app builds to the stores. A person approves first.
   mobile-store:
-    needs: web
-    if: ${{ needs.web.outputs.stage == 'prod' }}
+    needs: [meta, publish]
+    if: ${{ needs.meta.outputs.stage == 'prod' }}
     runs-on: ubuntu-latest
     environment: app-store
     env:
-      GH_TOKEN: ${{ github.token }}
-      VERSION: ${{ needs.web.outputs.version }}
-      STG: ${{ needs.web.outputs.from }}
+      VERSION: ${{ needs.meta.outputs.version }}
+      STG: ${{ needs.meta.outputs.from }}
     steps:
-      - uses: actions/checkout@v4
-      - name: Take the builds from the rc release
-        run: |
-          mkdir builds && gh release download "$STG" -D builds -p 'android-*' -p 'ios-*'
-          ls -la builds
-          gh release upload "$GITHUB_REF_NAME" builds/* --clobber
       - name: Simulated store release
         run: |
           {
             echo "### App $VERSION released to the stores (simulated)"
-            echo "Same builds as **$STG**, no rebuild."
+            echo "The prod builds of **$STG**, no rebuild."
             echo "| Platform | Would run |"
             echo "| --- | --- |"
-            echo "| Android | promote the $STG build from internal to **production** (staged rollout 10%) |"
-            echo "| iOS | submit the $STG TestFlight build for **App Store review**, release by hand after approval |"
+            echo "| Android | promote \`android-prod-app-release.aab\` of $STG from internal to **production** (staged rollout 10%) |"
+            echo "| iOS | submit the prod build of $STG from TestFlight for **App Store review**, release by hand after approval |"
           } >> "$GITHUB_STEP_SUMMARY"

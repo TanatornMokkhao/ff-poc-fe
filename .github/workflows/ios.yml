@@ -14,9 +14,10 @@ on:
       build_number:
         type: string
         default: ''
-      api_env:
+      stage:
+        description: staging or prod; bakes that stage's config.json (from the caller's config-<stage> artifact)
         type: string
-        default: dev
+        default: ''
 
 permissions:
   contents: read
@@ -29,7 +30,8 @@ jobs:
       VERSION_NAME: ${{ inputs.version_name || '0.0.0-dev' }}
       BUILD_NUMBER: ${{ inputs.build_number || github.run_number }}
       VITE_APP_VERSION: ${{ inputs.version_name || '0.0.0-dev' }}
-      VITE_API_ENV: ${{ inputs.api_env || 'dev' }}
+      VITE_API_ENV: ${{ inputs.stage || 'dev' }}
+      SUFFIX: ${{ inputs.stage && format('-{0}', inputs.stage) || '' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -41,6 +43,14 @@ jobs:
           cache: npm
 
       - run: npm ci
+      - uses: actions/download-artifact@v4
+        if: ${{ inputs.stage != '' }}
+        with:
+          name: config-${{ inputs.stage }}
+          path: public
+      - name: Local config.json (not a release build)
+        if: ${{ inputs.stage == '' }}
+        run: node scripts/write-config.mjs
       - run: npm run build
       - run: npx cap sync ios
 
@@ -76,7 +86,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ios-simulator-screenshot-${{ env.VERSION_NAME }}
+          name: ios-simulator-screenshot-${{ env.VERSION_NAME }}${{ env.SUFFIX }}
           path: ios-screenshot.png
 
       - name: Zip .app
@@ -84,5 +94,5 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ios-simulator-app-${{ env.VERSION_NAME }}
+          name: ios-simulator-app-${{ env.VERSION_NAME }}${{ env.SUFFIX }}
           path: App-simulator.zip
