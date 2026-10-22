@@ -171,15 +171,43 @@ jobs:
           fi
           gh release upload "$GITHUB_REF_NAME" upload/* --clobber
 
-      - name: Test channels
-        if: ${{ needs.meta.outputs.stage == 'staging' }}
+  # The apps reach testers only after a person approves the app-test environment. The web and the
+  # BE never wait for this: the hub deploys staging as soon as publish has run.
+  mobile-test:
+    needs: [meta, publish]
+    if: ${{ !cancelled() && needs.publish.result == 'success' && needs.meta.outputs.stage == 'staging' }}
+    runs-on: ubuntu-latest
+    environment: app-test
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.meta.outputs.version }}
+      FROM: ${{ needs.meta.outputs.from }}
+    steps:
+      # Real, not simulated: the staging app goes to the testers through Firebase App Distribution.
+      - name: Send the staging Android app to testers
+        if: ${{ vars.FIREBASE_APP_ID_ANDROID_STAGING != '' }}
+        env:
+          SA_JSON: ${{ secrets.FIREBASE_DISTRIBUTION_SA_JSON }}
+          APP_ID: ${{ vars.FIREBASE_APP_ID_ANDROID_STAGING }}
+          GROUPS: ${{ vars.FIREBASE_TESTER_GROUPS || 'staging-testers' }}
         run: |
+          set -euo pipefail
+          gh release download "$GITHUB_REF_NAME" -p android-staging-app-release.apk -D app
+          printf '%s' "$SA_JSON" > "$RUNNER_TEMP/sa.json"
+          GOOGLE_APPLICATION_CREDENTIALS="$RUNNER_TEMP/sa.json" npx --yes firebase-tools@15.32.1 \
+            appdistribution:distribute app/android-staging-app-release.apk \
+            --app "$APP_ID" --groups "$GROUPS" --release-notes "staging $VERSION"
+          rm -f "$RUNNER_TEMP/sa.json"
+      - name: Test channels
+        run: |
+          SENT=$([ -n "${{ vars.FIREBASE_APP_ID_ANDROID_STAGING }}" ] && echo "sent to **Firebase App Distribution**" || echo "not sent: set FIREBASE_APP_ID_ANDROID_STAGING")
           {
-            echo "### App $VERSION on the test channels"
+            echo "### App $VERSION on the test channels (approved)"
             [ -n "$FROM" ] && echo "Same builds as **$FROM** (this commit was built for that rc)."
             echo "| App | Android | iOS |"
             echo "| --- | --- | --- |"
-            echo "| staging \`com.tanatorn.ioniccipoc.staging\` (testers, staging API) | \`android-staging-app-release.apk\` sent to **Firebase App Distribution** (real, see the android (staging) job) | \`ios-staging-App-simulator.zip\` (simulated) |"
+            echo "| staging \`com.tanatorn.ioniccipoc.staging\` (testers, staging API) | \`android-staging-app-release.apk\` $SENT | \`ios-staging-App-simulator.zip\` (simulated) |"
             echo "| prod \`com.tanatorn.ioniccipoc\` (the build the stores get) | \`android-prod-app-release.aab\` to Play **internal** (simulated) | \`ios-prod-App-simulator.zip\` to **TestFlight** (simulated) |"
             echo
             echo "A signed IPA needs an Apple account; the iOS files are Simulator builds."
