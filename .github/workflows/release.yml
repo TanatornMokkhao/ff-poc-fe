@@ -171,16 +171,16 @@ jobs:
           fi
           gh release upload "$GITHUB_REF_NAME" upload/* --clobber
 
-      - name: Simulated upload to test channels
+      - name: Test channels
         if: ${{ needs.meta.outputs.stage == 'staging' }}
         run: |
           {
-            echo "### App $VERSION sent to test channels (simulated)"
+            echo "### App $VERSION on the test channels"
             [ -n "$FROM" ] && echo "Same builds as **$FROM** (this commit was built for that rc)."
             echo "| App | Android | iOS |"
             echo "| --- | --- | --- |"
-            echo "| staging (testers, staging API) | \`android-staging-app-release.aab\` to Play **internal** | \`ios-staging-App-simulator.zip\` to **TestFlight** |"
-            echo "| prod (the build the stores get) | \`android-prod-app-release.aab\` to Play **internal** | \`ios-prod-App-simulator.zip\` to **TestFlight** |"
+            echo "| staging \`com.tanatorn.ioniccipoc.staging\` (testers, staging API) | \`android-staging-app-release.apk\` sent to **Firebase App Distribution** (real, see the android (staging) job) | \`ios-staging-App-simulator.zip\` (simulated) |"
+            echo "| prod \`com.tanatorn.ioniccipoc\` (the build the stores get) | \`android-prod-app-release.aab\` to Play **internal** (simulated) | \`ios-prod-App-simulator.zip\` to **TestFlight** (simulated) |"
             echo
             echo "A signed IPA needs an Apple account; the iOS files are Simulator builds."
           } >> "$GITHUB_STEP_SUMMARY"

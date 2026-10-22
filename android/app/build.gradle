@@ -5,6 +5,10 @@ android {
     compileSdk = rootProject.ext.compileSdkVersion
     defaultConfig {
         applicationId "com.tanatorn.ioniccipoc"
+        // CI sets APP_ID_SUFFIX=.staging for the staging app, so it installs beside the prod app.
+        def appIdSuffix = System.getenv("APP_ID_SUFFIX") ?: ""
+        applicationIdSuffix = appIdSuffix
+        manifestPlaceholders = [appLabel: appIdSuffix ? "FF POC staging" : "@string/app_name"]
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode = (System.getenv("VERSION_CODE") ?: "1").toInteger()
