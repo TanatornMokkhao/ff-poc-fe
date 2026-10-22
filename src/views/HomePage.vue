@@ -8,7 +8,7 @@
 
     <ion-content :fullscreen="true" class="ion-padding">
       <ion-note v-if="config.flags.welcomeBanner" color="success">
-        <p><strong>New:</strong> this banner is turned on by a flag in config.json, without a new deploy.</p>
+        <p><strong>New:</strong> this banner is turned on by the FEATURE_WELCOME_BANNER setting of this stage.</p>
       </ion-note>
       <p>Env: <strong>{{ config.env }}</strong> · FE build: <strong>{{ appVersion }}</strong></p>
       <ion-card v-if="config.versions">
@@ -59,7 +59,7 @@ interface RuntimeConfig {
   versions?: { be: string; fe: string };
 }
 
-// One build serves every environment: env and flags arrive in config.json, written at deploy time.
+// env and flags arrive in config.json, baked per stage at build time; the hub adds the versions.
 const appVersion = import.meta.env.VITE_APP_VERSION || 'local';
 const config = ref<RuntimeConfig>({
   env: import.meta.env.VITE_API_ENV || 'local',
