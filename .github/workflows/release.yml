@@ -195,6 +195,15 @@ jobs:
       VERSION: ${{ needs.meta.outputs.version }}
       STG: ${{ needs.meta.outputs.from }}
     steps:
+      - name: Store credentials (from the app-store environment)
+        env:
+          PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          APP_STORE_CONNECT_API_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
+        run: |
+          [ -n "$PLAY_SERVICE_ACCOUNT_JSON" ] || { echo "::error::PLAY_SERVICE_ACCOUNT_JSON is missing in the app-store environment."; exit 1; }
+          [ -n "$APP_STORE_CONNECT_API_KEY" ] || { echo "::error::APP_STORE_CONNECT_API_KEY is missing in the app-store environment."; exit 1; }
+          echo "Play project: $(jq -r '.project_id // "not set"' <<<"$PLAY_SERVICE_ACCOUNT_JSON" 2>/dev/null || echo 'not JSON')"
+          echo "App Store Connect key: present"
       - name: Simulated store release
         run: |
           {

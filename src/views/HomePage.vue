@@ -16,6 +16,7 @@
           <ion-card-subtitle>Release on {{ config.env }}</ion-card-subtitle>
           <ion-card-title>fe {{ config.versions.fe }} · be {{ config.versions.be }}</ion-card-title>
         </ion-card-header>
+        <ion-card-content v-if="config.runtime">API: {{ config.runtime.API_BASE_URL }}</ion-card-content>
       </ion-card>
       <p>Status: <strong>{{ status }}</strong></p>
 
@@ -49,7 +50,7 @@ import { ref, onMounted } from 'vue';
 import { Capacitor } from '@capacitor/core';
 import { PushNotifications } from '@capacitor/push-notifications';
 import {
-  IonButton, IonCard, IonCardHeader, IonCardSubtitle, IonCardTitle, IonContent, IonHeader, IonItem, IonLabel, IonList, IonNote, IonPage, IonTextarea, IonTitle, IonToolbar,
+  IonButton, IonCard, IonCardContent, IonCardHeader, IonCardSubtitle, IonCardTitle, IonContent, IonHeader, IonItem, IonLabel, IonList, IonNote, IonPage, IonTextarea, IonTitle, IonToolbar,
 } from '@ionic/vue';
 
 interface RuntimeConfig {
@@ -57,6 +58,7 @@ interface RuntimeConfig {
   apiBaseUrl: string;
   flags: Record<string, boolean>;
   versions?: { be: string; fe: string };
+  runtime?: Record<string, string>;
 }
 
 // env and flags arrive in config.json, baked per stage at build time; the hub adds the versions.
