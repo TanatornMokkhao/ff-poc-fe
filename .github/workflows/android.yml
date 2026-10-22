@@ -69,7 +69,14 @@ jobs:
         if: ${{ env.HAS_GOOGLE_SERVICES == 'true' }}
         env:
           GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
-        run: printf '%s' "$GOOGLE_SERVICES_JSON" > android/app/google-services.json
+        run: |
+          printf '%s' "$GOOGLE_SERVICES_JSON" > android/app/google-services.json
+          # Until the staging app is registered in Firebase, build it under the prod id rather than fail.
+          if [ -n "$APP_ID_SUFFIX" ] && ! jq -e --arg p "com.tanatorn.ioniccipoc$APP_ID_SUFFIX" \
+              'any(.client[]; .client_info.android_client_info.package_name == $p)' android/app/google-services.json >/dev/null; then
+            echo "::warning::google-services.json has no com.tanatorn.ioniccipoc$APP_ID_SUFFIX app: building the staging app under the prod id."
+            echo "APP_ID_SUFFIX=" >> "$GITHUB_ENV"
+          fi
 
       - name: Debug APK
         working-directory: android
