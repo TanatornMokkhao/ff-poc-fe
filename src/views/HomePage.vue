@@ -39,6 +39,7 @@
           </ion-item>
         </ion-list>
       </template>
+      <p class="footer-note">Shipped through ff-poc-hub: one build, promoted from staging to prod.</p>
     </ion-content>
   </ion-page>
 </template>
@@ -104,3 +105,11 @@ async function copyToken() {
   await navigator.clipboard.writeText(token.value);
 }
 </script>
+
+<style scoped>
+.footer-note {
+  margin-top: 24px;
+  color: var(--ion-color-medium);
+  font-size: 13px;
+}
+</style>
