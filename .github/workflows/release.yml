@@ -1,13 +1,14 @@
 name: Release
 
 # One tag releases the web app and the mobile app together; they share this code and version.
-# v1.2.0-rc.N: build the web once (attached to the release), build the apps for the test
-#              channels, and point hub staging at this version.
-# v1.2.0:      only on a commit that already has a 1.2.0 rc; reuse that rc's web build
-#              (no rebuild) and open a PR in the hub to point production at it.
+# Tags are made by a person in GitHub Releases (or git push):
+#   staging/v1.2.0, staging/v1.2.0-2 …  build the web once (attached to the release), build the
+#                apps for the test channels, and point hub staging at this version.
+#   prod/v1.2.0  only on a commit that already has a staging/v1.2.0 tag; reuse that staging
+#                build (no rebuild) and open a PR in the hub to point production at it.
 on:
   push:
-    tags: ['v*']
+    tags: ['staging/v*', 'prod/v*']
 
 permissions:
   contents: write
@@ -18,6 +19,7 @@ jobs:
     outputs:
       version: ${{ steps.v.outputs.version }}
       stage: ${{ steps.v.outputs.stage }}
+      staging_tag: ${{ steps.stg.outputs.tag }}
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -25,23 +27,28 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Resolve version
+      - name: Read the tag
         id: v
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          if [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]; then STAGE=staging
-          elif [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then STAGE=prod
-          else echo "Tag $GITHUB_REF_NAME is not vX.Y.Z or vX.Y.Z-rc.N"; exit 1; fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF_NAME" =~ ^staging/v([0-9]+\.[0-9]+\.[0-9]+)(-([0-9]+))?$ ]]; then
+            STAGE=staging; BASE="${BASH_REMATCH[1]}"; VERSION="${GITHUB_REF_NAME#staging/v}"
+          elif [[ "$GITHUB_REF_NAME" =~ ^prod/v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            STAGE=prod; BASE="${BASH_REMATCH[1]}"; VERSION="$BASE"
+          else
+            echo "Tag $GITHUB_REF_NAME must be staging/vX.Y.Z, staging/vX.Y.Z-N or prod/vX.Y.Z"; exit 1
+          fi
           echo "stage=$STAGE" >> "$GITHUB_OUTPUT"
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Production must come from an rc of the same version
+      - name: Production must come from staging (same version, same commit)
         if: ${{ steps.v.outputs.stage == 'prod' }}
-        id: rc
+        id: stg
         run: |
-          RC=$(git tag --points-at "$GITHUB_SHA" | grep -E "^v${{ steps.v.outputs.version }}-rc\.[0-9]+$" | sort -V | tail -1)
-          [ -n "$RC" ] || { echo "No v${{ steps.v.outputs.version }}-rc.N on this commit: it never went to staging."; exit 1; }
-          echo "rc=$RC" >> "$GITHUB_OUTPUT"
+          STG=$(git tag --points-at "$GITHUB_SHA" | grep -E "^staging/v${{ steps.v.outputs.base }}(-[0-9]+)?$" | sort -V | tail -1)
+          [ -n "$STG" ] || { echo "No staging/v${{ steps.v.outputs.base }} tag on this commit: it never went to staging."; exit 1; }
+          echo "tag=$STG" >> "$GITHUB_OUTPUT"
+          echo "Promoting the build made for $STG"
 
       - uses: actions/setup-node@v4
         if: ${{ steps.v.outputs.stage == 'staging' }}
@@ -49,7 +56,7 @@ jobs:
           node-version: 22
           cache: npm
 
-      - name: Build the web once (rc)
+      - name: Build the web once (staging)
         if: ${{ steps.v.outputs.stage == 'staging' }}
         run: |
           npm ci
@@ -58,14 +65,19 @@ jobs:
           rm -f dist/config.json
           (cd dist && zip -qr "$GITHUB_WORKSPACE/web-build.zip" .)
 
-      - name: Reuse the rc's web build (final)
+      - name: Reuse the staging web build (prod)
         if: ${{ steps.v.outputs.stage == 'prod' }}
-        run: gh release download "${{ steps.rc.outputs.rc }}" -p web-build.zip
+        run: gh release download "${{ steps.stg.outputs.tag }}" -p web-build.zip
 
-      - name: GitHub release
+      - name: GitHub release (reuse the one made in the UI, if any)
         run: |
           FLAG=$([ "${{ steps.v.outputs.stage }}" = staging ] && echo --prerelease || echo --latest)
-          gh release create "$GITHUB_REF_NAME" web-build.zip --generate-notes $FLAG
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" $FLAG
+            gh release upload "$GITHUB_REF_NAME" web-build.zip --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" web-build.zip --generate-notes $FLAG
+          fi
 
   android:
     needs: web
@@ -87,7 +99,7 @@ jobs:
       version_name: ${{ needs.web.outputs.version }}
       api_env: staging
 
-  # Simulated: keeps the rc's app builds on the rc release and says where they would go.
+  # Simulated: keeps the staging app builds on the staging release and says where they would go.
   mobile-test-channels:
     needs: [web, android, ios]
     runs-on: ubuntu-latest
@@ -99,7 +111,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: builds
-      - name: Attach the app builds to the rc release
+      - name: Attach the app builds to the staging release
         run: |
           mkdir -p upload
           find builds -name '*.aab' -exec cp {} upload/android-app-release.aab \; || true
@@ -119,7 +131,7 @@ jobs:
             echo "Builds are attached to release $GITHUB_REF_NAME."
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # Simulated: the final tag promotes the rc's app builds to the stores. A person approves first.
+  # Simulated: the prod tag promotes the staging app builds to the stores. A person approves first.
   mobile-store:
     needs: web
     if: ${{ needs.web.outputs.stage == 'prod' }}
@@ -128,26 +140,23 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       VERSION: ${{ needs.web.outputs.version }}
+      STG: ${{ needs.web.outputs.staging_tag }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Take the builds from the rc release
+      - name: Take the builds from the staging release
         run: |
-          RC=$(git tag --points-at "$GITHUB_SHA" | grep -E "^v$VERSION-rc\.[0-9]+$" | sort -V | tail -1)
-          echo "RC=$RC" >> "$GITHUB_ENV"
-          mkdir builds && gh release download "$RC" -D builds -p 'android-*' -p 'ios-*'
+          mkdir builds && gh release download "$STG" -D builds -p 'android-*' -p 'ios-*'
           ls -la builds
           gh release upload "$GITHUB_REF_NAME" builds/* --clobber
       - name: Simulated store release
         run: |
           {
             echo "### App $VERSION released to the stores (simulated)"
-            echo "Same builds as **$RC**, no rebuild."
+            echo "Same builds as **$STG**, no rebuild."
             echo "| Platform | Would run |"
             echo "| --- | --- |"
-            echo "| Android | promote the $RC build from internal to **production** (staged rollout 10%) |"
-            echo "| iOS | submit the $RC TestFlight build for **App Store review**, release by hand after approval |"
+            echo "| Android | promote the $STG build from internal to **production** (staged rollout 10%) |"
+            echo "| iOS | submit the $STG TestFlight build for **App Store review**, release by hand after approval |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   hub:
