@@ -34,6 +34,8 @@ jobs:
       VITE_APP_VERSION: ${{ inputs.version_name || '0.0.0-dev' }}
       VITE_API_ENV: ${{ inputs.stage || 'dev' }}
       SUFFIX: ${{ inputs.stage && format('-{0}', inputs.stage) || '' }}
+      # The staging app is a separate app (its own id in Firebase), so testers can keep both.
+      APP_ID_SUFFIX: ${{ inputs.stage == 'staging' && '.staging' || '' }}
       HAS_KEYSTORE: ${{ secrets.KEYSTORE_BASE64 != '' }}
       HAS_GOOGLE_SERVICES: ${{ secrets.GOOGLE_SERVICES_JSON != '' }}
     steps:
@@ -97,9 +99,24 @@ jobs:
           AAPT=$(ls "$ANDROID_HOME"/build-tools/*/aapt | sort -V | tail -1)
           "$AAPT" dump resources android/app/build/outputs/apk/debug/app-debug.apk | grep -q google_app_id
 
+      # Real, not simulated: the staging app goes to the testers through Firebase App Distribution.
+      # Needs vars.FIREBASE_APP_ID_ANDROID_STAGING and secrets.FIREBASE_DISTRIBUTION_SA_JSON.
+      - name: Send the staging app to testers
+        if: ${{ inputs.stage == 'staging' && env.HAS_KEYSTORE == 'true' && vars.FIREBASE_APP_ID_ANDROID_STAGING != '' }}
+        env:
+          SA_JSON: ${{ secrets.FIREBASE_DISTRIBUTION_SA_JSON }}
+          APP_ID: ${{ vars.FIREBASE_APP_ID_ANDROID_STAGING }}
+          GROUPS: ${{ vars.FIREBASE_TESTER_GROUPS || 'staging-testers' }}
+        run: |
+          printf '%s' "$SA_JSON" > "$RUNNER_TEMP/sa.json"
+          GOOGLE_APPLICATION_CREDENTIALS="$RUNNER_TEMP/sa.json" npx --yes firebase-tools@15.32.1 \
+            appdistribution:distribute android/app/build/outputs/apk/release/app-release.apk \
+            --app "$APP_ID" --groups "$GROUPS" --release-notes "staging $VERSION_NAME"
+          rm -f "$RUNNER_TEMP/sa.json"
+
       - name: Remove keystore
         if: ${{ always() }}
-        run: rm -f "$RUNNER_TEMP/release.keystore" android/app/google-services.json
+        run: rm -f "$RUNNER_TEMP/release.keystore" "$RUNNER_TEMP/sa.json" android/app/google-services.json
 
       - name: Check no secret files are left for upload
         run: |
