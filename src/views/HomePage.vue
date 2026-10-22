@@ -11,7 +11,12 @@
         <p><strong>New:</strong> this banner is turned on by a flag in config.json, without a new deploy.</p>
       </ion-note>
       <p>Env: <strong>{{ config.env }}</strong> · FE build: <strong>{{ appVersion }}</strong></p>
-      <p v-if="config.versions">Hub says: be <strong>{{ config.versions.be }}</strong> · fe <strong>{{ config.versions.fe }}</strong></p>
+      <ion-card v-if="config.versions">
+        <ion-card-header>
+          <ion-card-subtitle>Release on {{ config.env }}</ion-card-subtitle>
+          <ion-card-title>fe {{ config.versions.fe }} · be {{ config.versions.be }}</ion-card-title>
+        </ion-card-header>
+      </ion-card>
       <p>Status: <strong>{{ status }}</strong></p>
 
       <ion-button expand="block" :disabled="!isNative" @click="register">Register for push</ion-button>
@@ -43,7 +48,7 @@ import { ref, onMounted } from 'vue';
 import { Capacitor } from '@capacitor/core';
 import { PushNotifications } from '@capacitor/push-notifications';
 import {
-  IonButton, IonContent, IonHeader, IonItem, IonLabel, IonList, IonNote, IonPage, IonTextarea, IonTitle, IonToolbar,
+  IonButton, IonCard, IonCardHeader, IonCardSubtitle, IonCardTitle, IonContent, IonHeader, IonItem, IonLabel, IonList, IonNote, IonPage, IonTextarea, IonTitle, IonToolbar,
 } from '@ionic/vue';
 
 interface RuntimeConfig {
