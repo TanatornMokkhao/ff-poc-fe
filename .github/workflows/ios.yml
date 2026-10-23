@@ -29,6 +29,7 @@ jobs:
       VERSION_NAME: ${{ inputs.version_name || '0.0.0-dev' }}
       BUILD_NUMBER: ${{ inputs.build_number || github.run_number }}
       VITE_APP_VERSION: ${{ inputs.version_name || '0.0.0-dev' }}
+      VITE_GIT_SHA: ${{ inputs.ref || github.sha }}
       VITE_API_ENV: ${{ inputs.stage || 'dev' }}
       SUFFIX: ${{ inputs.stage && format('-{0}', inputs.stage) || '' }}
     steps:
