@@ -108,9 +108,13 @@ jobs:
       - name: Build the web for ${{ matrix.stage }}
         env:
           VITE_APP_VERSION: ${{ needs.meta.outputs.version }}
+          VITE_GIT_SHA: ${{ github.sha }}
           VITE_API_ENV: ${{ matrix.stage }}
         run: |
           npm run build
+          # What this build is, written by the build itself; the hub checks it against the pin.
+          printf '{"app":"fe","version":"%s","commit":"%s","stage":"%s","builtAt":"%s"}\n' \
+            "$VITE_APP_VERSION" "$VITE_GIT_SHA" "$VITE_API_ENV" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > dist/build-info.json
           (cd dist && zip -qr "$GITHUB_WORKSPACE/web-build-${{ matrix.stage }}.zip" .)
       - uses: actions/upload-artifact@v4
         with:

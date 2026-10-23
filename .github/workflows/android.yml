@@ -31,6 +31,7 @@ jobs:
       VERSION_CODE: ${{ inputs.version_code || github.run_number }}
       VERSION_NAME: ${{ inputs.version_name || '0.0.0-dev' }}
       VITE_APP_VERSION: ${{ inputs.version_name || '0.0.0-dev' }}
+      VITE_GIT_SHA: ${{ inputs.ref || github.sha }}
       VITE_API_ENV: ${{ inputs.stage || 'dev' }}
       SUFFIX: ${{ inputs.stage && format('-{0}', inputs.stage) || '' }}
       # The staging app is a separate app (its own id in Firebase), so testers can keep both.

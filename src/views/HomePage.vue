@@ -10,7 +10,7 @@
       <ion-note v-if="config.flags.welcomeBanner" color="success">
         <p><strong>New:</strong> this banner is turned on by the FEATURE_WELCOME_BANNER setting of this stage.</p>
       </ion-note>
-      <p>Env: <strong>{{ config.env }}</strong> · FE build: <strong>{{ appVersion }}</strong></p>
+      <p>Env: <strong>{{ config.env }}</strong> · FE build: <strong>{{ appVersion }}</strong> ({{ appCommit }})</p>
       <ion-card v-if="config.versions">
         <ion-card-header>
           <ion-card-subtitle>Release on {{ config.env }}</ion-card-subtitle>
@@ -63,6 +63,7 @@ interface RuntimeConfig {
 
 // env and flags arrive in config.json, baked per stage at build time; the hub adds the versions.
 const appVersion = import.meta.env.VITE_APP_VERSION || 'local';
+const appCommit = (import.meta.env.VITE_GIT_SHA || 'local').slice(0, 7);
 const config = ref<RuntimeConfig>({
   env: import.meta.env.VITE_API_ENV || 'local',
   apiBaseUrl: '',
